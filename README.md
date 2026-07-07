@@ -6,7 +6,7 @@
 
 CareAssets 是一个轻巧的 macOS 状态栏资产追踪工具。它把你关心的币、美股、港股、A 股和黄金收进菜单栏，平时只占很小一块状态栏空间，点开后可以搜索、添加、排序、选择展示项。
 
-![CareAssets screenshot](docs/careassets-screenshot.jpg)
+![CareAssets screenshot](docs/careassets-screenshot.png)
 
 ## 特点
 
