@@ -528,25 +528,22 @@ final class AssetService {
     func fetchAssets(config: AppConfig) async -> [DisplayAsset] {
         var results: [String: DisplayAsset] = [:]
 
-        for asset in config.assets where asset.type == .gold {
-            results[key(for: asset)] = await fetchGold(asset)
-        }
-
+        let goldAssets = config.assets.filter { $0.type == .gold }
         let cryptoAssets = config.assets.filter { $0.type == .crypto }
-        if !cryptoAssets.isEmpty {
-            let fetched = await fetchCryptoAssets(cryptoAssets)
-            for (key, value) in fetched {
-                results[key] = value
-            }
-        }
-
         let stockAssets = config.assets.filter { $0.type == .stock }
-        if !stockAssets.isEmpty {
-            let fetched = await fetchStockAssets(stockAssets)
-            for (key, value) in fetched {
-                results[key] = value
-            }
-        }
+
+        async let goldFetch: [String: DisplayAsset] = {
+            var r: [String: DisplayAsset] = [:]
+            for asset in goldAssets { r[key(for: asset)] = await fetchGold(asset) }
+            return r
+        }()
+        async let cryptoFetch = cryptoAssets.isEmpty ? [:] : fetchCryptoAssets(cryptoAssets)
+        async let stockFetch = stockAssets.isEmpty ? [:] : fetchStockAssets(stockAssets)
+
+        let (gold, crypto, stock) = await (goldFetch, cryptoFetch, stockFetch)
+        for (k, v) in gold { results[k] = v }
+        for (k, v) in crypto { results[k] = v }
+        for (k, v) in stock { results[k] = v }
 
         return config.assets.map { asset in
             results[key(for: asset)] ?? DisplayAsset.loading(from: asset)
@@ -736,7 +733,7 @@ extension AssetService {
 
     private func fetchDerivedChineseGold(_ asset: TrackedAsset) async -> DisplayAsset {
         let encodedSymbol = "GC=F".addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? "GC=F"
-        let url = URL(string: "https://query1.finance.yahoo.com/v8/finance/chart/\(encodedSymbol)?range=1d&interval=5m")!
+        let url = URL(string: "https://query1.finance.yahoo.com/v8/finance/chart/\(encodedSymbol)?range=1d&interval=1d")!
 
         do {
             async let goldData = requestData(from: url)
@@ -789,7 +786,7 @@ extension AssetService {
 
     private func fetchInternationalGold(_ asset: TrackedAsset) async -> DisplayAsset {
         let encodedSymbol = "GC=F".addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? "GC=F"
-        let url = URL(string: "https://query1.finance.yahoo.com/v8/finance/chart/\(encodedSymbol)?range=1d&interval=5m")!
+        let url = URL(string: "https://query1.finance.yahoo.com/v8/finance/chart/\(encodedSymbol)?range=1d&interval=1d")!
 
         do {
             let data = try await requestData(from: url)
@@ -975,6 +972,16 @@ private struct YahooChart: Decodable {
 
 private struct YahooResult: Decodable {
     var meta: YahooMeta
+    var timestamp: [Int]?
+    var indicators: YahooIndicators?
+}
+
+private struct YahooIndicators: Decodable {
+    var quote: [YahooQuoteData]?
+}
+
+private struct YahooQuoteData: Decodable {
+    var close: [Double?]?
 }
 
 private struct YahooMeta: Decodable {
@@ -1070,46 +1077,81 @@ extension AssetService {
     }
 
     private func fetchStockAssets(_ assets: [TrackedAsset]) async -> [String: DisplayAsset] {
-        var rawQuotes: [RawStockQuote] = []
         var output: [String: DisplayAsset] = [:]
 
-        for asset in assets {
-            do {
-                rawQuotes.append(try await fetchStockQuote(asset))
-            } catch {
-                output[key(for: asset)] = errorAsset(asset, source: "Yahoo Finance", message: error.localizedDescription)
+        await withTaskGroup(of: (String, DisplayAsset?).self) { group in
+            for asset in assets {
+                group.addTask {
+                    do {
+                        let quote = try await self.fetchStockQuote(asset)
+                        let change = quote.previousClose.map { quote.price - $0 }
+                        let percent = quote.previousClose.flatMap { previous -> Double? in
+                            guard previous != 0 else { return nil }
+                            return (quote.price - previous) / previous * 100.0
+                        }
+                        let da = DisplayAsset(
+                            id: self.key(for: quote.asset),
+                            type: .stock,
+                            name: quote.asset.name,
+                            symbol: quote.asset.symbol,
+                            source: "Yahoo Finance",
+                            menuPriceText: formatStatusNumber(quote.price, minFraction: 2, maxFraction: 2),
+                            priceText: "\(formatCurrency(quote.price, currencyCode: quote.currency, compact: false)) \(quote.currency)",
+                            detailText: quote.asset.symbol,
+                            changeText: formatChange(amount: change, percent: percent, currencyPrefix: currencySymbol(for: quote.currency)),
+                            changePercent: percent,
+                            updatedAt: quote.updatedAt,
+                            visibleInMenuBar: quote.asset.visibleInMenuBar,
+                            errorMessage: nil,
+                            timeSeries: nil,
+                            timeSeriesChange: nil,
+                            timeSeriesHigh: nil,
+                            timeSeriesLow: nil
+                        )
+                        return (self.key(for: quote.asset), da)
+                    } catch {
+                        let da = errorAsset(asset, source: "Yahoo Finance", message: error.localizedDescription)
+                        return (self.key(for: asset), da)
+                    }
+                }
             }
-        }
-
-        for quote in rawQuotes {
-            let change = quote.previousClose.map { quote.price - $0 }
-            let percent = quote.previousClose.flatMap { previous -> Double? in
-                guard previous != 0 else { return nil }
-                return (quote.price - previous) / previous * 100.0
+            for await (id, asset) in group {
+                if let asset { output[id] = asset }
             }
-
-            output[key(for: quote.asset)] = DisplayAsset(
-                id: key(for: quote.asset),
-                type: .stock,
-                name: quote.asset.name,
-                symbol: quote.asset.symbol,
-                source: "Yahoo Finance",
-                menuPriceText: formatStatusNumber(quote.price, minFraction: 2, maxFraction: 2),
-                priceText: "\(formatCurrency(quote.price, currencyCode: quote.currency, compact: false)) \(quote.currency)",
-                detailText: quote.asset.symbol,
-                changeText: formatChange(amount: change, percent: percent, currencyPrefix: currencySymbol(for: quote.currency)),
-                changePercent: percent,
-                updatedAt: quote.updatedAt,
-                visibleInMenuBar: quote.asset.visibleInMenuBar,
-                errorMessage: nil,
-                timeSeries: nil,
-                timeSeriesChange: nil,
-                timeSeriesHigh: nil,
-                timeSeriesLow: nil
-            )
         }
 
         return output
+    }
+
+    func enrichWithTimeSeries(_ assets: [DisplayAsset]) async -> [DisplayAsset] {
+        await withTaskGroup(of: DisplayAsset.self) { group in
+            for asset in assets {
+                group.addTask {
+                    guard asset.errorMessage == nil, asset.type == .stock else { return asset }
+                    let series = await self.fetchTimeSeries(symbol: asset.symbol)
+                    guard let series else { return asset }
+                    let seriesChange: Double? = {
+                        guard let first = series.first?.price, let last = series.last?.price, first != 0 else { return nil }
+                        return (last - first) / first * 100.0
+                    }()
+                    return DisplayAsset(
+                        id: asset.id, type: asset.type, name: asset.name, symbol: asset.symbol,
+                        source: asset.source,
+                        menuPriceText: asset.menuPriceText, priceText: asset.priceText,
+                        detailText: asset.detailText, changeText: asset.changeText,
+                        changePercent: asset.changePercent, updatedAt: asset.updatedAt,
+                        visibleInMenuBar: asset.visibleInMenuBar, errorMessage: asset.errorMessage,
+                        timeSeries: series,
+                        timeSeriesChange: seriesChange,
+                        timeSeriesHigh: series.map(\.price).max(),
+                        timeSeriesLow: series.map(\.price).min()
+                    )
+                }
+            }
+            var result: [DisplayAsset] = []
+            for await asset in group { result.append(asset) }
+            return result
+        }
     }
 
     private func searchYahooStocks(query: String) async throws -> [AssetSearchResult] {
@@ -1322,9 +1364,39 @@ extension AssetService {
         return uppercased
     }
 
+    private func fetchTimeSeries(symbol: String) async -> [TimeSeriesData]? {
+        let encoded = symbol.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? symbol
+        guard let url = URL(string: "https://query1.finance.yahoo.com/v8/finance/chart/\(encoded)?range=1d&interval=5m") else { return nil }
+        do {
+            let data = try await requestData(from: url)
+            let response = try JSONDecoder().decode(YahooChartResponse.self, from: data)
+            guard let result = response.chart.result?.first else {
+                NSLog("CareAssets fetchTimeSeries[\(symbol)]: no result")
+                return nil
+            }
+            guard let timestamps = result.timestamp else {
+                NSLog("CareAssets fetchTimeSeries[\(symbol)]: no timestamps")
+                return nil
+            }
+            guard let closes = result.indicators?.quote?.first?.close else {
+                NSLog("CareAssets fetchTimeSeries[\(symbol)]: no closes, indicators=\(String(describing: result.indicators))")
+                return nil
+            }
+            let series: [TimeSeriesData] = zip(timestamps, closes).compactMap { ts, close in
+                guard let c = close else { return nil }
+                return TimeSeriesData(timestamp: Date(timeIntervalSince1970: TimeInterval(ts)), price: c)
+            }
+            NSLog("CareAssets fetchTimeSeries[\(symbol)]: got \(series.count) points")
+            return series.isEmpty ? nil : series
+        } catch {
+            NSLog("CareAssets fetchTimeSeries[\(symbol)]: error \(error)")
+            return nil
+        }
+    }
+
     private func fetchStockQuote(_ asset: TrackedAsset) async throws -> RawStockQuote {
         let encodedSymbol = asset.symbol.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? asset.symbol
-        let url = URL(string: "https://query1.finance.yahoo.com/v8/finance/chart/\(encodedSymbol)?range=1d&interval=5m")!
+        let url = URL(string: "https://query1.finance.yahoo.com/v8/finance/chart/\(encodedSymbol)?range=1d&interval=1d")!
         let data = try await requestData(from: url)
         let response = try JSONDecoder().decode(YahooChartResponse.self, from: data)
 
@@ -1351,7 +1423,7 @@ extension AssetService {
     private func fetchFXQuote(from sourceCurrency: String, to targetCurrency: String) async throws -> FXQuote {
         let symbol = "\(sourceCurrency.uppercased())\(targetCurrency.uppercased())=X"
         let encodedSymbol = symbol.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? symbol
-        let url = URL(string: "https://query1.finance.yahoo.com/v8/finance/chart/\(encodedSymbol)?range=1d&interval=5m")!
+        let url = URL(string: "https://query1.finance.yahoo.com/v8/finance/chart/\(encodedSymbol)?range=1d&interval=1d")!
         let data = try await requestData(from: url)
         let response = try JSONDecoder().decode(YahooChartResponse.self, from: data)
 
@@ -1409,12 +1481,16 @@ final class StatusTickerView: NSView {
 
     var timeSeriesDisplayMode: TimeSeriesDisplayMode = .hidden {
         didSet {
+            invalidateIntrinsicContentSize()
             needsDisplay = true
         }
     }
 
+    private let chartAreaWidth: CGFloat = 40
+
     var preferredWidth: CGFloat {
-        max(28, CGFloat(items.count) * cellWidth)
+        let perCell = timeSeriesDisplayMode != .hidden ? cellWidth + chartAreaWidth : cellWidth
+        return max(28, CGFloat(items.count) * perCell)
     }
 
     override var intrinsicContentSize: NSSize {
@@ -1442,32 +1518,30 @@ final class StatusTickerView: NSView {
         return image
     }
 
+    private var perCellWidth: CGFloat {
+        timeSeriesDisplayMode != .hidden ? cellWidth + chartAreaWidth : cellWidth
+    }
+
     private func drawTicker(in bounds: NSRect) {
         guard !items.isEmpty else { return }
 
         let center = NSMutableParagraphStyle()
         center.alignment = .center
 
+        let showChart = timeSeriesDisplayMode != .hidden
+        let pcw = perCellWidth
+
+        // 垂直布局（文字区）
         let titleHeight: CGFloat = 10
         let valueHeight: CGFloat = 13
         let titleY = max(0, bounds.height - titleHeight - 0.5)
         let valueY = max(0, titleY - valueHeight + 2)
-        let chartHeight: CGFloat = timeSeriesDisplayMode != .hidden ? 12 : 0
-        let chartY: CGFloat = max(0, valueY - chartHeight - 2)
 
         for (index, item) in items.enumerated() {
-            let cellX = CGFloat(index) * cellWidth
-            let rect = NSRect(x: cellX - 2, y: 0, width: cellWidth + 4, height: bounds.height)
+            let cellOriginX = CGFloat(index) * pcw
 
-            // 绘制分时线
-            if timeSeriesDisplayMode != .hidden, let timeSeries = item.timeSeries, !timeSeries.isEmpty {
-                drawTimeSeriesChart(
-                    timeSeries: timeSeries,
-                    in: NSRect(x: rect.minX + 2, y: chartY, width: rect.width - 4, height: chartHeight),
-                    displayMode: timeSeriesDisplayMode,
-                    item: item
-                )
-            }
+            // 文字区：左侧 cellWidth 宽度
+            let textRect = NSRect(x: cellOriginX - 2, y: 0, width: cellWidth + 4, height: bounds.height)
 
             drawStatusText(
                 titleText(for: item),
@@ -1475,7 +1549,7 @@ final class StatusTickerView: NSView {
                 asciiFont: senFont(ofSize: 7),
                 color: statusTitleColor(alpha: 0.86),
                 paragraphStyle: center,
-                in: NSRect(x: rect.minX, y: titleY, width: rect.width, height: titleHeight)
+                in: NSRect(x: textRect.minX, y: titleY, width: textRect.width, height: titleHeight)
             )
             drawStatusText(
                 valueText(for: item),
@@ -1483,8 +1557,24 @@ final class StatusTickerView: NSView {
                 asciiFont: senFont(ofSize: 11.5),
                 color: valueColor(for: item),
                 paragraphStyle: center,
-                in: NSRect(x: rect.minX, y: valueY, width: rect.width, height: valueHeight)
+                in: NSRect(x: textRect.minX, y: valueY, width: textRect.width, height: valueHeight)
             )
+
+            // 分时图区：文字区右侧，inset 2px 上下留 3px
+            if showChart {
+                NSLog("CareAssets draw[\(item.symbol)]: showChart=\(showChart) timeSeries=\(item.timeSeries?.count ?? -1)")
+            }
+            if showChart, let timeSeries = item.timeSeries, !timeSeries.isEmpty {
+                let chartX = cellOriginX + cellWidth + 2
+                let chartW = chartAreaWidth - 4
+                let chartRect = NSRect(x: chartX, y: 3, width: chartW, height: bounds.height - 6)
+                drawTimeSeriesChart(
+                    timeSeries: timeSeries,
+                    in: chartRect,
+                    displayMode: timeSeriesDisplayMode,
+                    item: item
+                )
+            }
         }
     }
 
@@ -1508,7 +1598,7 @@ final class StatusTickerView: NSView {
         lineColor.setStroke()
 
         let path = NSBezierPath()
-        path.lineWidth = 0.8
+        path.lineWidth = 0.6
 
         // 绘制分时线
         for (index, timeData) in timeSeries.enumerated() {
@@ -3167,6 +3257,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
 
         let currentConfig = config
         Task {
+            // 第一阶段：获取价格数据，快速更新 UI
             let fetchedAssets = await service.fetchAssets(config: currentConfig)
             await MainActor.run {
                 let fetchedByID = Dictionary(uniqueKeysWithValues: fetchedAssets.map { ($0.id, $0) })
@@ -3176,6 +3267,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 }
                 self.isRefreshing = false
                 self.secondsUntilRefresh = max(10, self.config.refreshIntervalSeconds)
+                self.updateViews()
+            }
+
+            // 第二阶段：后台异步追加分时数据，完成后再次更新 UI
+            guard currentConfig.timeSeriesDisplayMode != .hidden else { return }
+            let enriched = await service.enrichWithTimeSeries(fetchedAssets)
+            await MainActor.run {
+                let enrichedByID = Dictionary(uniqueKeysWithValues: enriched.map { ($0.id, $0) })
+                self.assets = self.assets.map { asset in
+                    enrichedByID[asset.id] ?? asset
+                }
                 self.updateViews()
             }
         }
@@ -3331,6 +3433,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     private func setTimeSeriesDisplayMode(_ mode: TimeSeriesDisplayMode) {
         config.timeSeriesDisplayMode = mode
         ConfigStore.write(config)
+        tickerView.timeSeriesDisplayMode = mode
+        updateStatusItem()
         updateViews()
     }
 
