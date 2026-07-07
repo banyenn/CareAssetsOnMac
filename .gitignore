@@ -1,0 +1,11 @@
+.DS_Store
+*.zip
+*.app
+!/CareAssets.app/
+!/CareAssets.app/**
+
+CareAssets/build/
+
+.build/
+.swiftpm/
+DerivedData/
