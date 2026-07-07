@@ -1,5 +1,7 @@
 # CareAssets
 
+> **Fork 自 [Highway-wu/CareAssets](https://github.com/Highway-wu/CareAssets)**，在原项目基础上新增价格显示模式、间距调节和分时图功能。
+
 <img align="right" width="360" src="docs/careassets-install-finder.png" alt="双击 CareAssets.app 打开应用">
 
 如果你是普通用户，不需要构建项目，下载后直接双击根目录里的 `CareAssets.app` 即可打开；想长期使用可以把它拖到 macOS 的“应用程序”文件夹里。
@@ -95,6 +97,8 @@ MIT License。详见 [LICENSE](LICENSE)。
 ---
 
 ## English
+
+> **Forked from [Highway-wu/CareAssets](https://github.com/Highway-wu/CareAssets)** with added price display modes, item spacing control, and intraday chart support.
 
 CareAssets is a lightweight macOS menu bar app for keeping the assets you care about one glance away. It brings crypto, US stocks, Hong Kong stocks, A-shares, and gold into a compact status bar ticker with a clean popover for search, sorting, and display control.
 
